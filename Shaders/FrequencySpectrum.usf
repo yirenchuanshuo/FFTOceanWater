@@ -1,0 +1,53 @@
+#include "/Engine/Private/Common.ush"
+#include "FFTOceanHLSLCommon.ush"
+
+RWTexture2D<float4> FFTXYTexture;
+RWTexture2D<float4> FFTZTexture;
+Texture2D HZeroTexture;
+
+[numthreads(THREADGROUP_SIZE_X,THREADGROUP_SIZE_Y,THREADGROUP_SIZE_Z)]
+void ComputeFrequencySpectrum(uint3 ThreadId : SV_DispatchThreadID)
+{
+	int2 pos = ThreadId.xy;
+	float2 WaveVector = float2(pos.x-128,pos.y-128);
+	
+	WaveVector *=2.0f * PI;
+	WaveVector /= OceanBasicUniformBuffer.PatchLength[ThreadId.z];
+	float k = length(WaveVector);
+	float Freq = sqrt(OceanBasicUniformBuffer.Gravity*k);
+	Freq = floor(Freq / OceanBasicUniformBuffer.BaseFrequency) * OceanBasicUniformBuffer.BaseFrequency;
+	float Phase = Freq * OceanBasicUniformBuffer.AnimationTime;
+
+	
+	uint2 IndexXY = uint2(pos.x,pos.y+ThreadId.z*256);
+	
+	float4 h0 = HZeroTexture.Load(int3(IndexXY, 0));
+
+	float2 fourier_amp = h0.rg;
+	float2 fourier_amp_conj = h0.ba;
+	float2 SineCosine;
+	sincos(Phase,SineCosine.x,SineCosine.y);
+
+	float2 exponent = float2(SineCosine.y,SineCosine.x);
+	float2 exponent_inv = float2(SineCosine.y,-SineCosine.x);
+
+	float2 DispZ = float2(0,0);
+	float2 DispX = float2(0,0);
+	float2 DispY = float2(0,0);
+
+	if(k>0.000001f)
+	{
+		float2 c0 = jMul(fourier_amp,exponent);
+		float2 c1 = jMul(fourier_amp_conj,exponent_inv);
+		DispZ = jAdd(c0,c1);
+
+		float2 dx = float2(0.0f,WaveVector.x/k)*OceanBasicUniformBuffer.Chop[ThreadId.z];
+		DispX = jMul(DispZ,dx);
+
+		float2 dy = float2(0.0f,WaveVector.y/k)*OceanBasicUniformBuffer.Chop[ThreadId.z];
+		DispY = jMul(DispZ,dy);
+	}
+	
+	FFTXYTexture[IndexXY] = float4(DispX,DispY);
+	FFTZTexture[IndexXY] = float4(DispZ,0,0);
+}

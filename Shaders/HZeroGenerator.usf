@@ -1,0 +1,66 @@
+#include "/Engine/Private/Common.ush"
+#include "FFTOceanHLSLCommon.ush"
+
+
+RWTexture2D<float4> PhlipSurface;
+
+
+[numthreads(THREADGROUP_SIZE_X,THREADGROUP_SIZE_Y,THREADGROUP_SIZE_Z)]
+void ComputeHZero(uint3 ThreadId : SV_DispatchThreadID)
+{
+	int2 pos = ThreadId.xy;
+	float2 WaveVector = float2(pos.x-128,pos.y-128);
+	WaveVector *= 2.0f*PI;
+	WaveVector /= OceanBasicUniformBuffer.PatchLength[ThreadId.z];
+	
+	float k = length(WaveVector);
+
+	float L = OceanBasicUniformBuffer.WindSpeed * OceanBasicUniformBuffer.WindSpeed / OceanBasicUniformBuffer.Gravity;
+	float k2 = k*k;
+	float L2 = L*L;
+	
+	float2 Result = float2(0,0);
+	if(k>0.0001)
+	{
+		float2 k_norm = normalize(WaveVector);
+
+		float2 WindFactor;
+		WindFactor.x = dot(k_norm,OceanBasicUniformBuffer.WindDirection);
+		WindFactor.y = dot(-k_norm,OceanBasicUniformBuffer.WindDirection);
+
+
+		float2 WindFactorAbs = abs(WindFactor);
+		WindFactorAbs = pow(WindFactorAbs,OceanBasicUniformBuffer.WindTighten[ThreadId.z]);
+
+		WindFactorAbs.x*= WindFactor.x>0?1:OceanBasicUniformBuffer.WindDirectionality[ThreadId.z];
+		WindFactorAbs.y*= WindFactor.y>0?1:OceanBasicUniformBuffer.WindDirectionality[ThreadId.z];
+		WindFactor = WindFactorAbs;
+
+		
+		float k4 = k2*k2;
+		float UpperPart = OceanBasicUniformBuffer.Amplitude[ThreadId.z]*exp(-1.0f/(k2*L2));
+		float Spectrum = UpperPart/k4;
+
+		Spectrum *= exp(-k2*OceanBasicUniformBuffer.ShortWaveCutOff[ThreadId.z]);
+		Spectrum *= k<OceanBasicUniformBuffer.LongWaveCutOff[ThreadId.z]?0:1;
+
+		Result = sqrt(Spectrum*WindFactor);
+		Result *= 1.f/sqrt(2.0f);
+	}
+	
+	float4 PositiveAndNegativeSpectrum = float4(Result.rr,Result.gg);
+	int linearID = pos.x + pos.x * pos.y + ThreadId.z * pos.x*pos.y;
+	float Random1 = rand(2*PI,linearID,133);
+	float Random2 = rand(2*PI,linearID,134);
+	float Random3 = rand(2*PI,linearID,135);
+	float Random4 = rand(2*PI,linearID,136);
+	float4 Randoms = float4(Random1,Random1,Random2,Random2);
+	float4 Randoms2 = float4(sin(Random3),cos(Random3),sin(Random4),cos(Random4));
+	float4 ComplexAmplitudes =Randoms*Randoms2;
+	PositiveAndNegativeSpectrum *= ComplexAmplitudes;
+
+	PositiveAndNegativeSpectrum.w *= -1;
+	
+	uint2 IndexXY = uint2(pos.x,pos.y+ThreadId.z*256);
+	PhlipSurface[IndexXY] = PositiveAndNegativeSpectrum;
+}

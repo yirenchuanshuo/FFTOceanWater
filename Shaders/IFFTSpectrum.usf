@@ -1,0 +1,71 @@
+#include "/Engine/Private/Common.ush"
+#include "FFTOceanHLSLCommon.ush"
+RWTexture2D<float4> IFFTXYTextureUAV;
+RWTexture2D<float4> IFFTZTextureUAV;
+RWTexture2D<float4> DisplacementUAV;
+
+Texture2D IFFTXYTexture;
+Texture2D IFFTZTexture;
+
+uint Dir;
+
+[numthreads(THREADGROUP_SIZE_X,THREADGROUP_SIZE_Y,THREADGROUP_SIZE_Z)]
+void ComputeIFFTSpectrum(uint3 ThreadId : SV_DispatchThreadID)
+{
+	
+	uint2 position = uint2(ThreadId.x,ThreadId.y);
+	uint2 texturePos;
+	if(Dir == 0)
+	{
+		texturePos = uint2(position.xy);
+	}
+	else
+	{
+		texturePos = uint2(position.yx);
+	}
+	
+	for(uint Casc = 0;Casc<OceanBasicUniformBuffer.NumCascades;Casc++)
+	{
+		uint CascadeOffset = Casc*256;
+		
+		
+		float4 HK_DX_DY = IFFTXYTexture.Load(int3(texturePos.x,texturePos.y+CascadeOffset, 0));
+		float2 HK_DZ = IFFTZTexture.Load(int3(texturePos.x,texturePos.y+CascadeOffset, 0)).rg;
+		
+		pingPongArray[0][position.x].xyz = float3(HK_DX_DY.rb,HK_DZ.r);
+		pingPongArray[1][position.x].xyz = float3(HK_DX_DY.ga,HK_DZ.g);
+
+		uint4 textureIndices = uint4(0,1,2,3);
+		for(int i=0;i<BUTTERFLY_COUNT-1;i++)
+		{
+			GroupMemoryBarrierWithGroupSync();
+
+			ButterflyPass(i,position.x,textureIndices.x,textureIndices.y,pingPongArray[textureIndices.z][position.x].xyz,pingPongArray[textureIndices.w][position.x].xyz);
+			textureIndices.xyzw = textureIndices.zwxy;
+		}
+		GroupMemoryBarrierWithGroupSync();
+		
+		uint2 IndexXY = uint2(texturePos.x,texturePos.y+CascadeOffset);
+		if(Dir == 0)
+		{
+			float3 Real;
+			float3 Imaginary;
+			ButterflyPass(BUTTERFLY_COUNT-1,position.x,textureIndices.x,textureIndices.y,Real,Imaginary);
+
+			
+			IFFTXYTextureUAV[IndexXY] = float4(Real.r,Imaginary.r,Real.g,Imaginary.g);
+			IFFTZTextureUAV[IndexXY] = float4(Real.b,Imaginary.b,0,0);
+		}
+		else
+		{
+			float3 Real;
+			ButterflyPassFinalNoI(BUTTERFLY_COUNT-1,position.x,textureIndices.x,textureIndices.y,Real);
+			float perms[] = {1.0,-1.0};
+			int index = (position.x+position.y)%2;
+			float perm = perms[index];
+			Real*=perm;
+
+			DisplacementUAV[IndexXY] = float4(Real.xyz,1);
+		}
+	}
+}

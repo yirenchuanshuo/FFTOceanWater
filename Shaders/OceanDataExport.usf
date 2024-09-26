@@ -1,0 +1,137 @@
+#include "/Engine/Private/Common.ush"
+#include "FFTOceanHLSLCommon.ush"
+
+RWTexture2DArray<float4> DisplacementTextureOutput;
+RWTexture2DArray<float4> DisplacementTextureOutput_Previous;
+RWTexture2D<float4> PixelData_A;
+RWTexture2D<float4> PixelData_B;
+
+Texture2D DisplacementTexture;
+Texture2D DisplacementTexture_Previous;
+Texture2D Foam_Previous;
+
+[numthreads(VERTEXDATA_SIZE_X,VERTEXDATA_SIZE_Y,VERTEXDATA_SIZE_Z)]
+void OceanVertexDataExport(uint3 ThreadId : SV_DispatchThreadID)
+{
+	
+
+    static int2 SampleOffsets[5] = 
+    {
+        int2(0,0),
+        int2(0,1),
+        int2(0,-1),
+        int2(1,0),
+        int2(-1,0),
+    };
+
+    int3 position = int3(ThreadId.x,ThreadId.y,ThreadId.z);
+    int2 SamplePos = GetWrappedPosition(position.xyz,int2(0,0));
+    
+    float3 Displacement_Prev = DisplacementTexture_Previous.Load(int3(SamplePos,0)).xyz;
+    float3 Displacement_Center = DisplacementTexture.Load(int3(SamplePos,0)).xyz;
+    
+    SamplePos = GetWrappedPosition(position.xyz,int2(0,1));
+    float3 Displacement_Bottom = DisplacementTexture.Load(int3(SamplePos,0)).xyz;
+
+    /*SamplePos = GetWrappedPosition(position.xyz,int2(0,-1));
+    float3 Displacement_Top = DisplacementTexture.Load(int3(SamplePos,0));*/
+    
+    SamplePos = GetWrappedPosition(position.xyz,int2(1,0));
+    float3 Displacement_Right = DisplacementTexture.Load(int3(SamplePos,0)).xyz;
+
+    /*SamplePos = GetWrappedPosition(position.xyz,int2(-1,0));
+    float3 Displacement_Left = DisplacementTexture.Load(int3(SamplePos,0));*/
+
+
+    float WorldTexelSize = OceanBasicUniformBuffer.PatchLength[ThreadId.z]/256.0f;
+
+    float Jxx = 1+(Displacement_Right.x-Displacement_Center.x)/WorldTexelSize;
+    float Jyy = 1+(Displacement_Bottom.y-Displacement_Center.y)/WorldTexelSize;
+
+    float Jyx = (Displacement_Right.y-Displacement_Center.y)/WorldTexelSize;
+    float Jxy = (Displacement_Bottom.x-Displacement_Center.x)/WorldTexelSize;
+
+    float JacobianDeterminant = Jxx*Jyy-Jxy*Jxy;
+    JacobianDeterminant = -JacobianDeterminant + OceanBasicUniformBuffer.FoamThreshlod[ThreadId.z]+1;
+
+    float EigenValue_ = (Jxx + Jyy)*0.5f - pow((Jxx-Jyy)*(Jxx-Jyy)+4.0f*Jxy*Jxy,0.5f)*0.5f;
+
+    
+    float Foam = OceanBasicUniformBuffer.FoamInjection[ThreadId.z]*saturate(1-EigenValue_ + OceanBasicUniformBuffer.FoamThreshlod[ThreadId.z]);
+
+    SamplePos = GetWrappedPosition(position.xyz,int2(0,0));
+    float PreviousFoamCenter = Foam_Previous.Load(int3(SamplePos,0)).b;
+
+    float AccumulatedFoam = 0;
+    for(int q=1;q<5;q++)
+    {
+        SamplePos = GetWrappedPosition(position.xyz,SampleOffsets[q]);
+        float FoamSample = Foam_Previous.Load(int3(SamplePos,0)).b;
+        AccumulatedFoam += FoamSample;
+    }
+
+    float PreviousFoam = lerp(PreviousFoamCenter,AccumulatedFoam*0.25f,saturate(OceanBasicUniformBuffer.DeltaTime * OceanBasicUniformBuffer.FoamBlur[ThreadId.z]));
+
+    float FadedPreviousFoam = saturate(PreviousFoam - OceanBasicUniformBuffer.FoamFade[ThreadId.z]*OceanBasicUniformBuffer.DeltaTime);
+
+    Foam = max(Foam,FadedPreviousFoam);
+
+    float DXx = Displacement_Right.x-Displacement_Center.x;
+
+    float DYx = Displacement_Right.y-Displacement_Center.y;
+
+    float DZx = Displacement_Right.z-Displacement_Center.z;
+
+    float DXy = Displacement_Bottom.x-Displacement_Center.x;
+
+    float DYy = Displacement_Bottom.y-Displacement_Center.y;
+
+    float DZy = Displacement_Bottom.z-Displacement_Center.z;
+    
+
+    /*float4 AttributesA = float4(DXx,DZx,DYy,DZy)/WorldTexelSize;
+    float4 AttributesB = float4(DXy/WorldTexelSize,DYx/WorldTexelSize,Foam,JacobianDeterminant);*/
+
+    float4 AttributesA = float4(DXx/WorldTexelSize,DYx/WorldTexelSize,DZx/WorldTexelSize,Foam);
+    float4 AttributesB = float4(DXy/WorldTexelSize,DYy/WorldTexelSize,DZy/WorldTexelSize,JacobianDeterminant);
+
+    uint2 indexXY = uint2(position.x,position.y+ThreadId.z*256);
+    PixelData_A[indexXY] = AttributesA;
+    PixelData_B[indexXY] = AttributesB;
+    
+    DisplacementTextureOutput[position] = float4(Displacement_Center*100,0);
+    DisplacementTextureOutput_Previous[position] = float4(Displacement_Prev*100,0);
+}
+
+RWTexture2D<float4> PixelAttributeA_00;
+RWTexture2D<float4> PixelAttributeA_01;
+RWTexture2D<float4> PixelAttributeA_02;
+RWTexture2D<float4> PixelAttributeA_03;
+RWTexture2D<float4> PixelAttributeB_00;
+RWTexture2D<float4> PixelAttributeB_01;
+RWTexture2D<float4> PixelAttributeB_02;
+RWTexture2D<float4> PixelAttributeB_03;
+
+Texture2D AttributesA;
+Texture2D AttributesB;
+
+[numthreads(PIXLEDATA_SIZE_X,PIXLEDATA_SIZE_Y,PIXLEDATA_SIZE_Z)]
+void OceanPixelDataExport(uint3 ThreadId : SV_DispatchThreadID)
+{
+    uint2 position = uint2(ThreadId.x,ThreadId.y);
+    uint2 sample_00 = uint2(ThreadId.x,ThreadId.y);
+    PixelAttributeA_00[position] = AttributesA.Load(int3(sample_00,0));
+    PixelAttributeB_00[position] = AttributesB.Load(int3(sample_00,0));
+
+    uint2 sample_01 = uint2(ThreadId.x,ThreadId.y+256);
+    PixelAttributeA_01[position] = AttributesA.Load(int3(sample_01,0));
+    PixelAttributeB_01[position] = AttributesB.Load(int3(sample_01,0));
+
+    uint2 sample_02 = uint2(ThreadId.x,ThreadId.y+512);
+    PixelAttributeA_02[position] = AttributesA.Load(int3(sample_02,0));
+    PixelAttributeB_02[position] = AttributesB.Load(int3(sample_02,0));
+
+    uint2 sample_03 = uint2(ThreadId.x,ThreadId.y+768);
+    PixelAttributeA_03[position] = AttributesA.Load(int3(sample_03,0));
+    PixelAttributeB_03[position] = AttributesB.Load(int3(sample_03,0));
+}

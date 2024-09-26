@@ -1,0 +1,140 @@
+#define LENGTH 256
+#define BUTTERFLY_COUNT 8
+
+#ifndef THREADGROUP_SIZE
+#define THREADGROUP_SIZE 256
+#endif
+
+static int RandomCounterNonDeterministic = -1;
+
+float4 rand4(int Seed1, int Seed2, int Seed3, int Seed4)
+{
+	int4 v = int4(Seed4, Seed1, Seed2, Seed3) * 1664525 + 1013904223;
+
+	v.x += v.y*v.w;
+	v.y += v.z*v.x;
+	v.z += v.x*v.y;
+	v.w += v.y*v.z;
+	v.x += v.y*v.w;
+	v.y += v.z*v.x;
+	v.z += v.x*v.y;
+	v.w += v.y*v.z;
+
+	// We can use 24 bits of randomness, as all integers in [0, 2^24] 
+	// are exactly representable in single precision floats.
+	// We use the upper 24 bits as they tend to be higher quality.
+
+	// The divide is often folded with the range scale in the rand functions
+	return float4((v >> 8) & 0x00ffffff) / 16777216.0; // 0x01000000 == 16777216
+	// return float4((v >> 8) & 0x00ffffff) * (1.0/16777216.0); // bugged, see UE-67738
+}
+
+float rand(float x,int Id,int Seed)
+{
+	RandomCounterNonDeterministic -= 1;
+	return rand4(Id, Seed, Id, RandomCounterNonDeterministic).x * x;
+}
+
+float RandValueFast(uint2 PixelPos,float Magic = 3571.0)
+{
+	float2 Random2 = 1.f/4320.f * PixelPos + float2(0.25,0.0);
+	float Random = frac(dot(Random2 * Random2,Magic));
+	Random = frac(Random*Random*2*Magic);
+	return Random;
+}
+
+float Gauss(uint2 PixelPos)
+{
+	float u1 = RandValueFast(PixelPos);
+	float u2 = RandValueFast(PixelPos);
+	if(u1<1e-6f)
+	{
+		u1 = 1e-6f;
+	}
+	return sqrt(-2*log(u1))*cos(2*PI*u2);
+}
+
+// Perform multiplication of two complex numbers
+float2 jMul(float2 c0,float2 c1)
+{
+	float2 c;
+	c.x=c0.x*c1.x-c0.y*c1.y;
+	c.y=c0.x*c1.y+c0.y*c1.x;
+	return c;
+}
+
+// Performs addition of two complex numbers
+float2 jAdd(float2 c0,float2 c1)
+{
+	float2 c;
+	c.x=c0.x+c1.x;
+	c.y=c0.y+c1.y;
+	return c;
+}
+
+void GetButterflyValues(uint passIndex,uint x,out uint2 indices,out float2 weights)
+{
+	int sectionWidth = 2u << passIndex;
+	int halfSectionWidth = sectionWidth/2;
+
+	int sectionStartOffset = x&~(sectionWidth-1);
+	int halfSectionOffset = x&(halfSectionWidth-1);
+	int sectionOffset = x&(sectionWidth-1);
+
+	sincos(2.0*PI*sectionOffset/(float)sectionWidth,weights.y,weights.x);
+	weights.y = -weights.y;
+
+	indices.x = sectionStartOffset+halfSectionOffset;
+	indices.y = sectionStartOffset+halfSectionOffset+halfSectionWidth;
+
+	if(passIndex==0)
+	{
+		indices = reversebits(indices)>>(32-BUTTERFLY_COUNT)&(LENGTH-1);
+	}
+}
+
+
+groupshared float3 pingPongArray[4][THREADGROUP_SIZE];
+
+void ButterflyPass(int passIndex,uint x,uint t0,uint t1,out float3 resultR, out float3 resultI)
+{
+	uint2 Indices;
+	float2 Weights;
+	GetButterflyValues(passIndex,x,Indices,Weights);
+
+	float3 inputR1 = pingPongArray[t0][Indices.x];
+	float3 inputI1 = pingPongArray[t1][Indices.x];
+
+	float3 inputR2 = pingPongArray[t0][Indices.y];
+	float3 inputI2 = pingPongArray[t1][Indices.y];
+
+	resultR = (inputR1+Weights.x*inputR2+Weights.y*inputI2)*0.5;
+	resultI = (inputI1-Weights.y*inputR2+Weights.x*inputI2)*0.5;
+}
+
+void ButterflyPassFinalNoI(int passIndex,uint x,uint t0,uint t1,out float3 resultR)
+{
+	uint2 Indices;
+	float2 Weights;
+	GetButterflyValues(passIndex,x,Indices,Weights);
+
+	float3 inputR1 = pingPongArray[t0][Indices.x];
+	float3 inputR2 = pingPongArray[t0][Indices.y];
+	float3 inputI2 = pingPongArray[t1][Indices.y];
+
+	resultR = (inputR1+Weights.x*inputR2+Weights.y*inputI2)*0.5;
+}
+
+int2 GetWrappedPosition(int3 pos,int2 offset)
+{
+	int2 posi=pos.xy+offset;
+	FLATTEN
+	if (posi.x>=LENGTH) posi.x-=LENGTH;
+	FLATTEN
+	if (posi.x<0) posi.x+=LENGTH;
+	FLATTEN
+	if (posi.y>=LENGTH) posi.y-=LENGTH;
+	FLATTEN
+	if (posi.y<0) posi.y+=LENGTH;
+	return int2(posi.x,posi.y+pos.z*LENGTH);
+}
