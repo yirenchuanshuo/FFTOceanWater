@@ -82,6 +82,7 @@ void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , 
 {
 	{
 		FRDGBuilder GraphBuilder(RHICommandList);
+		
 		FRDGTextureDesc DescFoam(FRDGTextureDesc::Create2D(
 				FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
 				SetupData.OutputUAVFormat,

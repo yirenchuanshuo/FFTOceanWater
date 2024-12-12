@@ -45,6 +45,16 @@ void UOceanDataComponent::BeginPlay()
 void UOceanDataComponent::PostLoad()
 {
 	Super::PostLoad();
+	if(Displacement == nullptr || Displacement_Previous == nullptr
+		|| PixelAttrbuteA_00 == nullptr || PixelAttrbuteA_01 == nullptr
+		|| PixelAttrbuteA_02 == nullptr || PixelAttrbuteA_03 == nullptr
+		|| PixelAttrbuteB_00 == nullptr || PixelAttrbuteB_01 == nullptr
+		|| PixelAttrbuteB_02 == nullptr || PixelAttrbuteB_03 == nullptr
+		|| DebugRenderTarget2D_00 == nullptr || DebugRenderTarget2D_01 == nullptr)
+	{
+		UE_LOG(LogTemp,Error,TEXT("OceanDataComponent::PostLoad() : RenderTarget is nullptr"));
+		return;
+	}
 	VertexRenderTargets[0] = Displacement->GameThread_GetRenderTargetResource();
 	VertexRenderTargets[1] = Displacement_Previous->GameThread_GetRenderTargetResource();
 

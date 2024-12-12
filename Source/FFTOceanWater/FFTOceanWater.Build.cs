@@ -42,6 +42,8 @@ public class FFTOceanWater : ModuleRules
 				"RenderCore",
 				"RHICore",
 				"RHI", 
+				"InputCore",
+				"Projects",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
