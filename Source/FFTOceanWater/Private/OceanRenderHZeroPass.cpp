@@ -42,9 +42,8 @@ OceanRenderHZeroPass::OceanRenderHZeroPass()
 }
 
 
-void OceanRenderHZeroPass::Draw(FRHICommandListImmediate& RHICommandList,const FOceanRenderHZeroPassData& SetupData,const UOceanDataComponent& OceanDataComponent)
+void OceanRenderHZeroPass::AddPass(FRDGBuilder& GraphBuilder, const FOceanRenderHZeroPassData& SetupData, const UOceanDataComponent& OceanDataComponent)
 {
-	FRDGBuilder GraphBuilder(RHICommandList);
 	FRDGTextureDesc Desc(FRDGTextureDesc::Create2D(
 			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
 			SetupData.OutputUAVFormat,
@@ -65,12 +64,18 @@ void OceanRenderHZeroPass::Draw(FRHICommandListImmediate& RHICommandList,const F
 	RDG_EVENT_NAME("HZeroComputeShader"),
 	OceanHZeroParameters,
 	ERDGPassFlags::AsyncCompute,
-	[&OceanHZeroParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+	[OceanHZeroParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 	{
 		FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanHZeroParameters,GroupCount);
 	});
 	
 	GraphBuilder.QueueTextureExtraction(SpectrumTexture, &OutputRT);
+}
+
+void OceanRenderHZeroPass::Draw(FRHICommandListImmediate& RHICommandList,const FOceanRenderHZeroPassData& SetupData,const UOceanDataComponent& OceanDataComponent)
+{
+	FRDGBuilder GraphBuilder(RHICommandList);
+	AddPass(GraphBuilder, SetupData, OceanDataComponent);
 	GraphBuilder.Execute();
 }
 

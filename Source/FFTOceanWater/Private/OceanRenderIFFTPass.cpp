@@ -44,10 +44,12 @@ OceanRenderIFFTPass::OceanRenderIFFTPass()
 {
 }
 
-void OceanRenderIFFTPass::Draw(FRHICommandListImmediate& RHICommandList, const FOceanRenderIFFTPassData& SetupData,
-                               const UOceanDataComponent& OceanDataComponent)
+void OceanRenderIFFTPass::AddPass(FRDGBuilder& GraphBuilder,
+                                  const FOceanRenderIFFTPassData& SetupData,
+                                  const UOceanDataComponent& OceanDataComponent,
+                                  FRDGTextureRef FrequencySpectrumXYInput,
+                                  FRDGTextureRef FrequencySpectrumZInput)
 {
-	
 	FRDGTextureDesc Desc(FRDGTextureDesc::Create2D(
 			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
 			SetupData.OutputUAVFormat,
@@ -55,60 +57,49 @@ void OceanRenderIFFTPass::Draw(FRHICommandListImmediate& RHICommandList, const F
 
 	TShaderMapRef<FOceeanComputeShader_IFFTSpectrumCS> OceanComputeShader(GetGlobalShaderMap(SetupData.FeatureLevel));
 	auto GroupCount = FIntVector(SetupData.OutputSizeX/FOceeanComputeShader_IFFTSpectrumCS::ThreadX, SetupData.OutputSizeY/4/FOceeanComputeShader_IFFTSpectrumCS::ThreadY, 1);
-	
-	TRefCountPtr<IPooledRenderTarget> OutputIFFTXYTexture;
-	TRefCountPtr<IPooledRenderTarget> OutputIFFTZTexture;
-	
+
+	// ---------------- Row pass (Dir = 0) ----------------
+	IFFTXYTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_FFTTextureXY"));
+	IFFTZTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_FFTTextureZ"));
+
+	IFFTXYTextureUAV = GraphBuilder.CreateUAV(IFFTXYTexture);
+	IFFTZTextureUAV = GraphBuilder.CreateUAV(IFFTZTexture);
+
+	// Temporary displacement UAV for the row pass (unused output but the shader binds it).
+	FRDGTextureRef DisplacementTextureRow = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_DisplacementTextureRow"));
+	FRDGTextureUAVRef DisplacementTextureRowUAV = GraphBuilder.CreateUAV(DisplacementTextureRow);
+
 	{
-		FRDGBuilder GraphBuilder(RHICommandList);
-		FRDGTextureRef IFFTXYTexture_Previous = RegisterExternalTexture(GraphBuilder,SetupData.FrequencySpectrumXYTexture,TEXT("OceanRenderIFFTSpectrumPass_FFTTextureXY_Previous"));
-		FRDGTextureRef IFFTZTexture_Previous = RegisterExternalTexture(GraphBuilder,SetupData.FrequencySpectrumZTexture,TEXT("OceanRenderIFFTSpectrumPass_FFTTextureZ_Previous"));
-
-		IFFTXYTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_FFTTextureXY"));
-		IFFTZTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_FFTTextureZ"));
-		
-		IFFTXYTextureUAV = GraphBuilder.CreateUAV(IFFTXYTexture);
-		IFFTZTextureUAV = GraphBuilder.CreateUAV(IFFTZTexture);
-
-		DisplacementTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_DisplacementTexture"));
-		DisplacementTextureUAV = GraphBuilder.CreateUAV(DisplacementTexture);
-
 		FOceeanComputeShader_IFFTSpectrumCS::FParameters* OceanIFFTSpectrumParameters = GraphBuilder.AllocParameters<FOceeanComputeShader_IFFTSpectrumCS::FParameters>();
-		OceanIFFTSpectrumParameters->DisplacementUAV = DisplacementTextureUAV;
-		OceanIFFTSpectrumParameters->IFFTXYTexture = IFFTXYTexture_Previous;
-		OceanIFFTSpectrumParameters->IFFTZTexture = IFFTZTexture_Previous;
+		OceanIFFTSpectrumParameters->DisplacementUAV = DisplacementTextureRowUAV;
+		OceanIFFTSpectrumParameters->IFFTXYTexture = FrequencySpectrumXYInput;
+		OceanIFFTSpectrumParameters->IFFTZTexture = FrequencySpectrumZInput;
 		OceanIFFTSpectrumParameters->IFFTXYTextureUAV = IFFTXYTextureUAV;
 		OceanIFFTSpectrumParameters->IFFTZTextureUAV = IFFTZTextureUAV;
 		OceanIFFTSpectrumParameters->Dir = 0;
 		OceanIFFTSpectrumParameters->OceanBasicUniformBufferData = CreateOceanUniformBuffer(GraphBuilder,OceanDataComponent);
 
 		ClearUnusedGraphResources(OceanComputeShader, OceanIFFTSpectrumParameters);
-		
+
 		GraphBuilder.AddPass(
 		RDG_EVENT_NAME("IFFTSpectrumComputeShaderRow"),
 		OceanIFFTSpectrumParameters,
 		ERDGPassFlags::AsyncCompute,
-		[&OceanIFFTSpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+		[OceanIFFTSpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 		{
 			FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanIFFTSpectrumParameters,GroupCount);
 		});
-		
-		GraphBuilder.QueueTextureExtraction(IFFTXYTexture, &OutputIFFTXYTexture);
-		GraphBuilder.QueueTextureExtraction(IFFTZTexture, &OutputIFFTZTexture);
-		GraphBuilder.Execute();
 	}
-	
-	
+
+	// ---------------- Column pass (Dir = 1) ----------------
+	DisplacementTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_DisplacementTexture"));
+	DisplacementTextureUAV = GraphBuilder.CreateUAV(DisplacementTexture);
+
 	{
-		FRDGBuilder GraphBuilder(RHICommandList);
-		DisplacementTexture = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderIFFTSpectrumPass_DisplacementTexture"));
-		DisplacementTextureUAV = GraphBuilder.CreateUAV(DisplacementTexture);
-		
-		
 		FOceeanComputeShader_IFFTSpectrumCS::FParameters* OceanIFFTSpectrumParameters = GraphBuilder.AllocParameters<FOceeanComputeShader_IFFTSpectrumCS::FParameters>();
 		OceanIFFTSpectrumParameters->DisplacementUAV = DisplacementTextureUAV;
-		OceanIFFTSpectrumParameters->IFFTXYTexture =   GraphBuilder.RegisterExternalTexture(OutputIFFTXYTexture);
-		OceanIFFTSpectrumParameters->IFFTZTexture = GraphBuilder.RegisterExternalTexture(OutputIFFTZTexture);
+		OceanIFFTSpectrumParameters->IFFTXYTexture = IFFTXYTexture;
+		OceanIFFTSpectrumParameters->IFFTZTexture = IFFTZTexture;
 		OceanIFFTSpectrumParameters->IFFTXYTextureUAV = DisplacementTextureUAV;
 		OceanIFFTSpectrumParameters->IFFTZTextureUAV = DisplacementTextureUAV;
 		OceanIFFTSpectrumParameters->Dir = 1;
@@ -119,15 +110,21 @@ void OceanRenderIFFTPass::Draw(FRHICommandListImmediate& RHICommandList, const F
 		RDG_EVENT_NAME("IFFTSpectrumComputeShaderCol"),
 		OceanIFFTSpectrumParameters,
 		ERDGPassFlags::AsyncCompute,
-		[&OceanIFFTSpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+		[OceanIFFTSpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 		{
 			FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanIFFTSpectrumParameters,GroupCount);
 		});
-		GraphBuilder.QueueTextureExtraction(DisplacementTexture, &OutputRTDisplacement);
-		GraphBuilder.Execute();
 	}
-	
-	
-	
-	
+
+	GraphBuilder.QueueTextureExtraction(DisplacementTexture, &OutputRTDisplacement);
+}
+
+void OceanRenderIFFTPass::Draw(FRHICommandListImmediate& RHICommandList, const FOceanRenderIFFTPassData& SetupData,
+                               const UOceanDataComponent& OceanDataComponent)
+{
+	FRDGBuilder GraphBuilder(RHICommandList);
+	FRDGTextureRef FreqXY = RegisterExternalTexture(GraphBuilder,SetupData.FrequencySpectrumXYTexture,TEXT("OceanRenderIFFTSpectrumPass_FFTTextureXY_Previous"));
+	FRDGTextureRef FreqZ  = RegisterExternalTexture(GraphBuilder,SetupData.FrequencySpectrumZTexture,TEXT("OceanRenderIFFTSpectrumPass_FFTTextureZ_Previous"));
+	AddPass(GraphBuilder, SetupData, OceanDataComponent, FreqXY, FreqZ);
+	GraphBuilder.Execute();
 }

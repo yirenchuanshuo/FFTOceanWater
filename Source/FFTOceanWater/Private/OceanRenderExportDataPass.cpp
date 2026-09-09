@@ -78,34 +78,37 @@ public:
 IMPLEMENT_SHADER_TYPE(,FOceeanComputeShader_PixelDataExportCS, TEXT("/Plugin/FFTOceanWater/OceanDataExport.usf"), TEXT("OceanPixelDataExport"), SF_Compute);
 
 
-void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , const FOceanRenderExportDataPassData& SetupData , const UOceanDataComponent& OceanDataComponent)
+void OceanRenderExportDataPass::AddPass(FRDGBuilder& GraphBuilder,
+                                        const FOceanRenderExportDataPassData& SetupData,
+                                        const UOceanDataComponent& OceanDataComponent,
+                                        FRDGTextureRef DisplacementInput)
 {
+	// -------------------------------------------------------------
+	// Part 1 : Vertex data export
+	// -------------------------------------------------------------
+	FRDGTextureDesc DescFoam(FRDGTextureDesc::Create2D(
+			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
+			SetupData.OutputUAVFormat,
+			FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV));
+
+	FRDGTextureDesc DescSpecArray(FRDGTextureDesc::Create2DArray(
+			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY/4),
+			SetupData.OutputUAVFormat,
+			FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV,4));
+
+	DisplacementTextureOutput = GraphBuilder.CreateTexture(DescSpecArray, TEXT("OceanRenderExportDataPass_DisplacementTextureOutput"));
+	DisplacementTextureOutputUAV = GraphBuilder.CreateUAV(DisplacementTextureOutput);
+
+	DisplacementTextureOutput_Previous = GraphBuilder.CreateTexture(DescSpecArray, TEXT("OceanRenderExportDataPass_DisplacementTextureOutput_Previous"));
+	DisplacementTextureOutput_PreviousUAV = GraphBuilder.CreateUAV(DisplacementTextureOutput_Previous);
+
+	PixelData_A = GraphBuilder.CreateTexture(DescFoam, TEXT("OceanRenderExportDataPass_PixelData_A"));
+	PixelDataUAV_A = GraphBuilder.CreateUAV(PixelData_A);
+
+	PixelData_B = GraphBuilder.CreateTexture(DescFoam, TEXT("OceanRenderExportDataPass_PixelData_B"));
+	PixelDataUAV_B = GraphBuilder.CreateUAV(PixelData_B);
+
 	{
-		FRDGBuilder GraphBuilder(RHICommandList);
-		
-		FRDGTextureDesc DescFoam(FRDGTextureDesc::Create2D(
-				FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
-				SetupData.OutputUAVFormat,
-				FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV));
-
-		FRDGTextureDesc DescSpecArray(FRDGTextureDesc::Create2DArray(
-				FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY/4),
-				SetupData.OutputUAVFormat,
-				FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV,4));
-
-		DisplacementTextureOutput = GraphBuilder.CreateTexture(DescSpecArray, TEXT("OceanRenderExportDataPass_DisplacementTextureOutput"));
-		DisplacementTextureOutputUAV = GraphBuilder.CreateUAV(DisplacementTextureOutput);
-
-		DisplacementTextureOutput_Previous = GraphBuilder.CreateTexture(DescSpecArray, TEXT("OceanRenderExportDataPass_DisplacementTextureOutput_Previous"));
-		DisplacementTextureOutput_PreviousUAV = GraphBuilder.CreateUAV(DisplacementTextureOutput_Previous);
-
-		PixelData_A = GraphBuilder.CreateTexture(DescFoam, TEXT("OceanRenderExportDataPass_PixelData_A"));
-		PixelDataUAV_A = GraphBuilder.CreateUAV(PixelData_A);
-
-		PixelData_B = GraphBuilder.CreateTexture(DescFoam, TEXT("OceanRenderExportDataPass_PixelData_B"));
-		PixelDataUAV_B = GraphBuilder.CreateUAV(PixelData_B);
-		
-
 		TShaderMapRef<FOceeanComputeShader_VertexDataExportCS> OceanComputeShader(GetGlobalShaderMap(SetupData.FeatureLevel));
 		FOceeanComputeShader_VertexDataExportCS::FParameters* OceanVertexDataExportParameters = GraphBuilder.AllocParameters<FOceeanComputeShader_VertexDataExportCS::FParameters>();
 
@@ -113,66 +116,69 @@ void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , 
 		OceanVertexDataExportParameters->DisplacementTextureOutput_Previous = DisplacementTextureOutput_PreviousUAV;
 		OceanVertexDataExportParameters->PixelData_A = PixelDataUAV_A;
 		OceanVertexDataExportParameters->PixelData_B = PixelDataUAV_B;
-		OceanVertexDataExportParameters->DisplacementTexture = RegisterExternalTexture(GraphBuilder,SetupData.DisplacementTexture,TEXT("DisplacementTexture"));
+		OceanVertexDataExportParameters->DisplacementTexture = DisplacementInput;
 		OceanVertexDataExportParameters->DisplacementTexture_Previous = RegisterExternalTexture(GraphBuilder,SetupData.DisplacementTexture_Previous,TEXT("DisplacementTexture_Previous"));
 		OceanVertexDataExportParameters->Foam_Previous = RegisterExternalTexture(GraphBuilder,SetupData.Foam_Previous,TEXT("FoamTexture_Previous"));
 		OceanVertexDataExportParameters->OceanBasicUniformBufferData = CreateOceanUniformBuffer(GraphBuilder,OceanDataComponent);
 
-		
 		auto GroupCount = FIntVector(SetupData.OutputSizeX/FOceeanComputeShader_VertexDataExportCS::ThreadX, SetupData.OutputSizeY/4/FOceeanComputeShader_VertexDataExportCS::ThreadY, 1);
 		GraphBuilder.AddPass(
 		RDG_EVENT_NAME("VertexDataExportComputeShader"),
 		OceanVertexDataExportParameters,
 		ERDGPassFlags::AsyncCompute,
-		[&OceanVertexDataExportParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+		[OceanVertexDataExportParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 		{
 			FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanVertexDataExportParameters,GroupCount);
 		});
+	}
 
-		
+	// Copy the array-typed displacement outputs to the persistent render targets.
+	{
 		FRHICopyTextureInfo CopyInfo;
 		CopyInfo.NumSlices = 4;
 		FRDGTextureRef VertexAttributesA = RegisterExternalTexture(GraphBuilder, OceanDataComponent.VertexRenderTargets[0]->GetRenderTargetTexture(), TEXT("DisplacementTextureOutput_RT"));
 		FRDGTextureRef VertexAttributesB = RegisterExternalTexture(GraphBuilder, OceanDataComponent.VertexRenderTargets[1]->GetRenderTargetTexture(), TEXT("DisplacementTextureOutput_Previous_RT"));
-		AddCopyTexturePass(GraphBuilder, DisplacementTextureOutput, VertexAttributesA,CopyInfo);
-		AddCopyTexturePass(GraphBuilder, DisplacementTextureOutput_Previous, VertexAttributesB,CopyInfo);
-
-		GraphBuilder.QueueTextureExtraction(PixelData_A, &PixelData_A_OutPut);	
-		GraphBuilder.QueueTextureExtraction(PixelData_B, &PixelData_B_OutPut);
-		
-		GraphBuilder.Execute();
+		AddCopyTexturePass(GraphBuilder, DisplacementTextureOutput, VertexAttributesA, CopyInfo);
+		AddCopyTexturePass(GraphBuilder, DisplacementTextureOutput_Previous, VertexAttributesB, CopyInfo);
 	}
-	
+
+	// Keep the pooled render targets for the next frame's Foam_Previous input.
+	GraphBuilder.QueueTextureExtraction(PixelData_A, &PixelData_A_OutPut);
+	GraphBuilder.QueueTextureExtraction(PixelData_B, &PixelData_B_OutPut);
+
+	// -------------------------------------------------------------
+	// Part 2 : Pixel data export (uses PixelData_A / PixelData_B directly via RDG)
+	// -------------------------------------------------------------
+	FRDGTextureDesc DescPixel(FRDGTextureDesc::Create2D(
+			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY/4),
+			SetupData.OutputUAVFormat,
+			FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV));
+
+	PixelAttributeA_00 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeA_00"));
+	PixelAttributeA_UAV_00 = GraphBuilder.CreateUAV(PixelAttributeA_00);
+
+	PixelAttributeA_01 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeA_01"));
+	PixelAttributeA_UAV_01 = GraphBuilder.CreateUAV(PixelAttributeA_01);
+
+	PixelAttributeA_02 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeA_02"));
+	PixelAttributeA_UAV_02 = GraphBuilder.CreateUAV(PixelAttributeA_02);
+
+	PixelAttributeA_03 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeA_03"));
+	PixelAttributeA_UAV_03 = GraphBuilder.CreateUAV(PixelAttributeA_03);
+
+	PixelAttributeB_00 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeB_00"));
+	PixelAttributeB_UAV_00 = GraphBuilder.CreateUAV(PixelAttributeB_00);
+
+	PixelAttributeB_01 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeB_01"));
+	PixelAttributeB_UAV_01 = GraphBuilder.CreateUAV(PixelAttributeB_01);
+
+	PixelAttributeB_02 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeB_02"));
+	PixelAttributeB_UAV_02 = GraphBuilder.CreateUAV(PixelAttributeB_02);
+
+	PixelAttributeB_03 = GraphBuilder.CreateTexture(DescPixel, TEXT("OceanRenderExportDataPass_PixelAttributeB_03"));
+	PixelAttributeB_UAV_03 = GraphBuilder.CreateUAV(PixelAttributeB_03);
+
 	{
-		FRDGBuilder GraphBuilder(RHICommandList);
-		FRDGTextureDesc Desc(FRDGTextureDesc::Create2D(
-				FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY/4),
-				SetupData.OutputUAVFormat,
-				FClearValueBinding::White, TexCreate_RenderTargetable | TexCreate_ShaderResource | TexCreate_UAV));
-		PixelAttributeA_00 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeA_00"));
-		PixelAttributeA_UAV_00 = GraphBuilder.CreateUAV(PixelAttributeA_00);
-
-		PixelAttributeA_01 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeA_01"));
-		PixelAttributeA_UAV_01 = GraphBuilder.CreateUAV(PixelAttributeA_01);
-
-		PixelAttributeA_02 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeA_02"));
-		PixelAttributeA_UAV_02 = GraphBuilder.CreateUAV(PixelAttributeA_02);
-
-		PixelAttributeA_03 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeA_03"));
-		PixelAttributeA_UAV_03 = GraphBuilder.CreateUAV(PixelAttributeA_03);
-
-		PixelAttributeB_00 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeB_00"));
-		PixelAttributeB_UAV_00 = GraphBuilder.CreateUAV(PixelAttributeB_00);
-
-		PixelAttributeB_01 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeB_01"));
-		PixelAttributeB_UAV_01 = GraphBuilder.CreateUAV(PixelAttributeB_01);
-
-		PixelAttributeB_02 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeB_02"));
-		PixelAttributeB_UAV_02 = GraphBuilder.CreateUAV(PixelAttributeB_02);
-
-		PixelAttributeB_03 = GraphBuilder.CreateTexture(Desc, TEXT("OceanRenderExportDataPass_PixelAttributeB_03"));
-		PixelAttributeB_UAV_03 = GraphBuilder.CreateUAV(PixelAttributeB_03);
-
 		TShaderMapRef<FOceeanComputeShader_PixelDataExportCS> OceanComputeShader(GetGlobalShaderMap(SetupData.FeatureLevel));
 		FOceeanComputeShader_PixelDataExportCS::FParameters* OceanPixelDataExportParameters = GraphBuilder.AllocParameters<FOceeanComputeShader_PixelDataExportCS::FParameters>();
 
@@ -184,19 +190,22 @@ void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , 
 		OceanPixelDataExportParameters->PixelAttributeB_01 = PixelAttributeB_UAV_01;
 		OceanPixelDataExportParameters->PixelAttributeB_02 = PixelAttributeB_UAV_02;
 		OceanPixelDataExportParameters->PixelAttributeB_03 = PixelAttributeB_UAV_03;
-		OceanPixelDataExportParameters->AttributesA = RegisterExternalTexture(GraphBuilder,PixelData_A_OutPut->GetRHI(),TEXT("AttributesA"));
-		OceanPixelDataExportParameters->AttributesB = RegisterExternalTexture(GraphBuilder,PixelData_B_OutPut->GetRHI(),TEXT("AttributesB"));
-		
+		// Directly reuse the RDG textures produced by the vertex export pass in the same graph.
+		OceanPixelDataExportParameters->AttributesA = PixelData_A;
+		OceanPixelDataExportParameters->AttributesB = PixelData_B;
+
 		auto GroupCount = FIntVector(SetupData.OutputSizeX/FOceeanComputeShader_PixelDataExportCS::ThreadX, SetupData.OutputSizeY/4/FOceeanComputeShader_PixelDataExportCS::ThreadY, 1);
 		GraphBuilder.AddPass(
 		RDG_EVENT_NAME("PixelDataExportComputeShader"),
 		OceanPixelDataExportParameters,
 		ERDGPassFlags::AsyncCompute,
-		[&OceanPixelDataExportParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+		[OceanPixelDataExportParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 		{
 			FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanPixelDataExportParameters,GroupCount);
 		});
+	}
 
+	{
 		FRHICopyTextureInfo CopyInfo;
 		FRDGTextureRef PixelAttributeA_OutPut_00 = RegisterExternalTexture(GraphBuilder, OceanDataComponent.PixelRenderTargets_A[0]->GetRenderTargetTexture(), TEXT("PixelAttributeA_OutPut_00"));
 		FRDGTextureRef PixelAttributeA_OutPut_01 = RegisterExternalTexture(GraphBuilder, OceanDataComponent.PixelRenderTargets_A[1]->GetRenderTargetTexture(), TEXT("PixelAttributeA_OutPut_01"));
@@ -214,6 +223,13 @@ void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , 
 		AddCopyTexturePass(GraphBuilder, PixelAttributeB_01, PixelAttributeB_OutPut_01,CopyInfo);
 		AddCopyTexturePass(GraphBuilder, PixelAttributeB_02, PixelAttributeB_OutPut_02,CopyInfo);
 		AddCopyTexturePass(GraphBuilder, PixelAttributeB_03, PixelAttributeB_OutPut_03,CopyInfo);
-		GraphBuilder.Execute();
 	}
+}
+
+void OceanRenderExportDataPass::Draw(FRHICommandListImmediate& RHICommandList , const FOceanRenderExportDataPassData& SetupData , const UOceanDataComponent& OceanDataComponent)
+{
+	FRDGBuilder GraphBuilder(RHICommandList);
+	FRDGTextureRef DisplacementExternal = RegisterExternalTexture(GraphBuilder,SetupData.DisplacementTexture,TEXT("DisplacementTexture"));
+	AddPass(GraphBuilder, SetupData, OceanDataComponent, DisplacementExternal);
+	GraphBuilder.Execute();
 }

@@ -1,6 +1,8 @@
 #include "OceanRender.h"
 #include "OceanDataComponent.h"
 #include "Engine/TextureRenderTarget2D.h"
+#include "RenderGraphBuilder.h"
+#include "RenderGraphUtils.h"
 
 
 OceanRender::OceanRender()
@@ -14,28 +16,51 @@ OceanRender::OceanRender()
 void OceanRender::Draw(FRHICommandListImmediate& RHICommandList,FOceanRenderData& SetupData, UOceanDataComponent& OceanDataComponent,
 	FTextureRenderTargetResource* DebugRenderTargetRHITexture ,FTextureRenderTargetResource* DebugRenderTargetRHITexture2)
 {
-	if(OceanDataComponent.GetHzeroInitState() == false)
+	// A single FRDGBuilder for the whole ocean-simulation frame.
+	// Every pass is enqueued via its AddPass() method and executed once at the end.
+	FRDGBuilder GraphBuilder(RHICommandList);
+
+	// -------- HZero --------
+	// HZero is generated once (initialization) and then reused across frames via OutputRT.
+	FRDGTextureRef HZeroTexture = nullptr;
+	if (OceanDataComponent.GetHzeroInitState() == false)
 	{
-		OceanHZeroPass->Draw(RHICommandList,SetupData.OceanHZeroPassData,OceanDataComponent);
+		OceanHZeroPass->AddPass(GraphBuilder, SetupData.OceanHZeroPassData, OceanDataComponent);
+		HZeroTexture = OceanHZeroPass->SpectrumTexture;
 		OceanDataComponent.SetHzeroInitState(true);
 	}
-	
-	SetupData.OceanFrequencySpectrumPassData.HZeroTexture = OceanHZeroPass->OutputRT->GetRHI();
-	FrequencyPass->Draw(RHICommandList,SetupData.OceanFrequencySpectrumPassData,OceanDataComponent);
+	else
+	{
+		check(OceanHZeroPass->OutputRT.IsValid());
+		HZeroTexture = GraphBuilder.RegisterExternalTexture(OceanHZeroPass->OutputRT, TEXT("HZeroTexture_Cached"));
+	}
 
-	SetupData.OceanIFFTPassData.FrequencySpectrumXYTexture = FrequencyPass->OutputRTXY->GetRHI();
-	SetupData.OceanIFFTPassData.FrequencySpectrumZTexture = FrequencyPass->OutputRTZ->GetRHI();
-	
-	IFFTPass->Draw(RHICommandList,SetupData.OceanIFFTPassData,OceanDataComponent);
+	// -------- Frequency spectrum --------
+	FrequencyPass->AddPass(GraphBuilder, SetupData.OceanFrequencySpectrumPassData, OceanDataComponent, HZeroTexture);
 
-	SetupData.OceanExportDataPassData.DisplacementTexture = IFFTPass->OutputRTDisplacement->GetRHI();
-	
+	// -------- IFFT (Row + Column) --------
+	IFFTPass->AddPass(GraphBuilder, SetupData.OceanIFFTPassData, OceanDataComponent,
+		FrequencyPass->FFTXYTexture, FrequencyPass->FFTZTexture);
 
-	ExportDataPass->Draw(RHICommandList,SetupData.OceanExportDataPassData,OceanDataComponent);
-	
-	RHICommandList.CopyTexture(FrequencyPass->OutputRTXY->GetRHI(), OceanDataComponent.DebugRenderTarget2D_00->GetRenderTargetResource()->GetTexture2DRHI(), FRHICopyTextureInfo());
-	RHICommandList.CopyTexture(FrequencyPass->OutputRTZ->GetRHI(), OceanDataComponent.DebugRenderTarget2D_01->GetRenderTargetResource()->GetTexture2DRHI(), FRHICopyTextureInfo());
-	
+	// -------- Export data (vertex + pixel) --------
+	ExportDataPass->AddPass(GraphBuilder, SetupData.OceanExportDataPassData, OceanDataComponent,
+		IFFTPass->DisplacementTexture);
+
+	// -------- Debug outputs --------
+	if (DebugRenderTargetRHITexture && DebugRenderTargetRHITexture2)
+	{
+		FRDGTextureRef DebugRT0 = RegisterExternalTexture(GraphBuilder,
+			DebugRenderTargetRHITexture->GetRenderTargetTexture(),
+			TEXT("OceanDebugRT_00"));
+		FRDGTextureRef DebugRT1 = RegisterExternalTexture(GraphBuilder,
+			DebugRenderTargetRHITexture2->GetRenderTargetTexture(),
+			TEXT("OceanDebugRT_01"));
+		AddCopyTexturePass(GraphBuilder, FrequencyPass->FFTXYTexture, DebugRT0, FRHICopyTextureInfo());
+		AddCopyTexturePass(GraphBuilder, FrequencyPass->FFTZTexture,  DebugRT1, FRHICopyTextureInfo());
+	}
+
+	// Execute all recorded passes at once.
+	GraphBuilder.Execute();
 }
 
 void OceanRender::Dispatch(FOceanRenderData& SetupData, UOceanDataComponent& OceanDataComponent,

@@ -41,10 +41,11 @@ OceanRenderFrequencySpectrumPass::OceanRenderFrequencySpectrumPass()
 {
 }
 
-void OceanRenderFrequencySpectrumPass::Draw(FRHICommandListImmediate& RHICommandList,
-                                            const FOceanRenderFrequencySpectrumPassData& SetupData, const UOceanDataComponent& OceanDataComponent)
+void OceanRenderFrequencySpectrumPass::AddPass(FRDGBuilder& GraphBuilder,
+                                               const FOceanRenderFrequencySpectrumPassData& SetupData,
+                                               const UOceanDataComponent& OceanDataComponent,
+                                               FRDGTextureRef HZeroTextureInput)
 {
-	FRDGBuilder GraphBuilder(RHICommandList);
 	FRDGTextureDesc Desc(FRDGTextureDesc::Create2D(
 			FIntPoint(SetupData.OutputSizeX, SetupData.OutputSizeY),
 			SetupData.OutputUAVFormat,
@@ -56,11 +57,11 @@ void OceanRenderFrequencySpectrumPass::Draw(FRHICommandListImmediate& RHICommand
 	FFTXYTextureUAV = GraphBuilder.CreateUAV(FFTXYTexture);
 	FFTZTextureUAV = GraphBuilder.CreateUAV(FFTZTexture);
 
+	HZeroTexture = HZeroTextureInput;
+
 	TShaderMapRef<FOceeanComputeShader_FrequencySpectrumCS> OceanComputeShader(GetGlobalShaderMap(SetupData.FeatureLevel));
 	FOceeanComputeShader_FrequencySpectrumCS::FParameters* OceanFrequencySpectrumParameters = GraphBuilder.AllocParameters<FOceeanComputeShader_FrequencySpectrumCS::FParameters>();
 
-	//Update uniform buffer
-	HZeroTexture = RegisterExternalTexture(GraphBuilder,SetupData.HZeroTexture,TEXT("HZeroTexture"));
 	OceanFrequencySpectrumParameters->FFTXYTexture = FFTXYTextureUAV;
 	OceanFrequencySpectrumParameters->FFTZTexture = FFTZTextureUAV;
 	OceanFrequencySpectrumParameters->HZeroTexture = HZeroTexture;
@@ -71,13 +72,23 @@ void OceanRenderFrequencySpectrumPass::Draw(FRHICommandListImmediate& RHICommand
 	RDG_EVENT_NAME("FrequencySpectrumComputeShader"),
 	OceanFrequencySpectrumParameters,
 	ERDGPassFlags::AsyncCompute,
-	[&OceanFrequencySpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
+	[OceanFrequencySpectrumParameters, OceanComputeShader,GroupCount](FRHIComputeCommandList& RHICmdList)
 	{
 		FComputeShaderUtils::Dispatch(RHICmdList, OceanComputeShader, *OceanFrequencySpectrumParameters,GroupCount);
 	});
-	
-	GraphBuilder.QueueTextureExtraction(FFTXYTexture, &OutputRTXY);
-	GraphBuilder.QueueTextureExtraction(FFTZTexture, &OutputRTZ);
+
+	// NOTE: Intermediate outputs are consumed by the IFFT pass in the same GraphBuilder,
+	// so we no longer need to extract them to persistent pooled render targets.
+	// GraphBuilder.QueueTextureExtraction(FFTXYTexture, &OutputRTXY);
+	// GraphBuilder.QueueTextureExtraction(FFTZTexture, &OutputRTZ);
+}
+
+void OceanRenderFrequencySpectrumPass::Draw(FRHICommandListImmediate& RHICommandList,
+                                            const FOceanRenderFrequencySpectrumPassData& SetupData, const UOceanDataComponent& OceanDataComponent)
+{
+	FRDGBuilder GraphBuilder(RHICommandList);
+	FRDGTextureRef HZeroExternal = RegisterExternalTexture(GraphBuilder,SetupData.HZeroTexture,TEXT("HZeroTexture"));
+	AddPass(GraphBuilder, SetupData, OceanDataComponent, HZeroExternal);
 	GraphBuilder.Execute();
 }
 

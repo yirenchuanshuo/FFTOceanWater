@@ -2,9 +2,17 @@
 #include "OceanFFTCommonData.h"
 
 class UOceanDataComponent;
+class FRDGBuilder;
+
 class OceanRenderExportDataPass
 {
 public:
+	// Add the export-data passes (vertex + pixel export) into an existing GraphBuilder.
+	// DisplacementInput is the RDG texture produced by the IFFT pass in the same graph.
+	// DisplacementPreviousExternal / FoamPreviousExternal are RHI textures cached from the previous frame.
+	void AddPass(FRDGBuilder& GraphBuilder, const FOceanRenderExportDataPassData& SetupData, const UOceanDataComponent& OceanDataComponent,
+		FRDGTextureRef DisplacementInput);
+
 	void Draw(FRHICommandListImmediate& RHICommandList,const FOceanRenderExportDataPassData& SetupData , const UOceanDataComponent& OceanDataComponent);
 	
 	FRDGTextureRef DisplacementTextureOutput;
